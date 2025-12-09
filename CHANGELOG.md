@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2024-12-09
+
+### Changed
+
+- Migrated project to GitHub: [https://github.com/veictry/cursor-cli](https://github.com/veictry/cursor-cli)
+- Added project URLs (Homepage, Repository, Issues) to `pyproject.toml`
+- Added author information to project metadata
+- Updated README with GitHub badges and repository links
+- Added Contributing section to README
+
 ## [0.1.5] - 2024-12-09
 
 ### Added
