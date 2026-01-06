@@ -127,6 +127,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Resume a previous session. If no session ID provided, "
         "resumes the last session from this shell.",
     )
+    runner_group.add_argument(
+        "--file",
+        metavar="FILE_PATH",
+        help="Read task from a file. The prompt will be: "
+        "'请尝试完成 {absolute_path} 中的任务'",
+    )
 
     return parser
 
@@ -401,6 +407,7 @@ def run_with_session_management(
     resume_id: str | None,
     use_colors: bool,
     format_output: bool,
+    initial_prompt: str | None = None,
 ) -> int:
     """
     Run cursor-agent with session management.
@@ -413,10 +420,14 @@ def run_with_session_management(
         resume_id: Session ID to resume (or "__LAST_SESSION__" or None)
         use_colors: Whether to use colored output
         format_output: Whether to format stream-json output
+        initial_prompt: The initial prompt to record in db (defaults to prompt)
 
     Returns:
         Exit code
     """
+    # Use prompt as initial_prompt if not specified
+    if initial_prompt is None:
+        initial_prompt = prompt
     import subprocess
     import threading
     from typing import List, TextIO
@@ -469,14 +480,15 @@ def run_with_session_management(
     # Update session tracking
     session_mgr.set_last_session_id(session_id, workspace)
     if is_new_session:
-        session_mgr.update_index(session_id, prompt, workspace)
+        session_mgr.update_index(session_id, initial_prompt, workspace)
         session_mgr.cleanup_stale_sessions(workspace)
 
     # Build command
     cmd = ["cursor-agent"] + cursor_args
 
     # Create conversation file immediately for real-time writing
-    conv_writer = session_mgr.ConversationWriter(session_id, prompt, workspace)
+    # Use initial_prompt for the file header (original file content if --file was used)
+    conv_writer = session_mgr.ConversationWriter(session_id, initial_prompt, workspace)
 
     # Collect stderr in a separate thread
     stderr_chunks: List[str] = []
@@ -668,6 +680,27 @@ def main(argv: list | None = None) -> int:
         runner_args.text if runner_args.text and runner_args.text != "__TEXT_MODE__" else None
     )
 
+    # Handle --file option: read file content and use absolute path in prompt
+    file_content = None
+    if runner_args.file:
+        file_path = Path(runner_args.file).resolve()  # Get absolute path
+        if not file_path.exists():
+            print(f"Error: File not found: {runner_args.file}", file=sys.stderr)
+            return 1
+        try:
+            # Read file content for recording in database
+            file_content = file_path.read_text(encoding="utf-8")
+            # Use absolute path in prompt (cursor-agent can read the file)
+            prompt = f"请尝试完成 {file_path} 中的任务"
+            # Add streaming format and prompt to cursor_args
+            cursor_args = [
+                "--output-format", "stream-json", "--stream-partial-output",
+                "-p", prompt
+            ] + cursor_args
+        except Exception as e:
+            print(f"Error reading file: {e}", file=sys.stderr)
+            return 1
+
     # Check if --resume was given with what looks like a prompt
     # (e.g., "cursor-cli --resume 'What did I say?'")
     resume_as_prompt = None
@@ -692,9 +725,12 @@ def main(argv: list | None = None) -> int:
 
     if prompt or resume_as_prompt or runner_args.resume:
         # Simplified mode with session management
+        # Use file_content as initial_prompt for db recording if available
+        initial_prompt = file_content if file_content else (prompt or resume_as_prompt)
         return run_with_session_management(
             cursor_args=cursor_args,
             prompt=prompt or resume_as_prompt,
+            initial_prompt=initial_prompt,
             resume_id="__LAST_SESSION__" if resume_as_prompt else runner_args.resume,
             use_colors=not runner_args.no_color,
             format_output=not runner_args.no_format,

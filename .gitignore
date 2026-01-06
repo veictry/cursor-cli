@@ -3,3 +3,4 @@
 dist/
 .cursor-cli/**/*
 .DS_Store
+.cursor/credentials/**/*

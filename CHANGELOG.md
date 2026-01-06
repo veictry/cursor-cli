@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-01-06
+
+### Added
+
+- **`--file` option**: Read task from a file
+  - Usage: `cursor-cli --file /path/to/task.txt`
+  - Prompt sent to cursor-agent: `请尝试完成 {absolute_path} 中的任务`
+  - File content is recorded as `initial_prompt` in database for easy searching
+  - cursor-agent can read the file directly via the absolute path
+
 ## [0.1.8] - 2026-01-06
 
 ### Changed
