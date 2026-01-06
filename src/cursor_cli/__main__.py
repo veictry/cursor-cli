@@ -41,13 +41,11 @@ from .formatter import StreamJsonFormatter
 from . import session as session_mgr
 
 
-# Default permissions to ensure in cli-config.json
-DEFAULT_PERMISSIONS = {
+# Base permissions to ensure in cli-config.json (always added)
+BASE_PERMISSIONS = {
     "allow": [
         "Shell(*)",
         "Read(*)",
-        "Write(**/agents/**/*)",
-        "Write(**/.agents/**/*)",
     ],
     "deny": [],
 }
@@ -248,6 +246,9 @@ def setup_danger_permissions(folder_path: str) -> int:
     """
     Setup .cursor/cli-config.json with extended permissions.
 
+    Adds Write permission for the current working directory.
+    Running in different directories will accumulate Write permissions.
+
     Args:
         folder_path: Path to the folder where .cursor directory will be created
 
@@ -297,11 +298,21 @@ def setup_danger_permissions(folder_path: str) -> int:
         if "deny" not in permissions:
             permissions["deny"] = []
 
-        # Append default permissions if not already present
-        for perm in DEFAULT_PERMISSIONS["allow"]:
+        # Append base permissions if not already present
+        for perm in BASE_PERMISSIONS["allow"]:
             if perm not in permissions["allow"]:
                 permissions["allow"].append(perm)
                 print(f"  Added permission: {perm}")
+
+        # Add Write permission for current working directory
+        cwd = Path.cwd().resolve()
+        write_perm = f"Write({cwd}/**/*)"
+
+        if write_perm not in permissions["allow"]:
+            permissions["allow"].append(write_perm)
+            print(f"  Added permission: {write_perm}")
+        else:
+            print(f"  Already exists: {write_perm}")
 
         # Write config back
         with open(config_file, "w", encoding="utf-8") as f:
