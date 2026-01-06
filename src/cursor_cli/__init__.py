@@ -15,7 +15,7 @@ from .session import (
     ConversationWriter,
 )
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 __all__ = [
     "CursorCLIRunner",
     "StreamJsonFormatter",
