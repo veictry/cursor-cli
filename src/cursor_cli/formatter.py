@@ -272,18 +272,34 @@ class StreamJsonFormatter:
             self._start_new_section(OutputType.ASSISTANT)
             self.state.assistant_buffer = ""
 
-        # Only output new content (cursor-agent may send accumulated content)
+        # cursor-agent sends messages in two modes:
+        # 1. Incremental mode: each message contains only new text (delta)
+        # 2. Final mode: last message contains complete accumulated text
+        #
+        # We need to detect and handle both:
+        # - If text starts with buffer: accumulated mode, output only new part
+        # - If buffer ends with text or buffer contains text: skip (already output)
+        # - If text is new delta: output it and append to buffer
+
         if text.startswith(self.state.assistant_buffer):
+            # Accumulated mode: output only new content
             new_text = text[len(self.state.assistant_buffer) :]
             if new_text:
                 self._write(self._colorize(new_text, OutputType.ASSISTANT))
                 self.state.chars_generated += len(new_text)
             self.state.assistant_buffer = text
+        elif self.state.assistant_buffer.endswith(text) or text in self.state.assistant_buffer:
+            # This text is already part of what we've output, skip it
+            # This handles the final complete message case
+            pass
+        elif len(text) <= len(self.state.assistant_buffer) and self.state.assistant_buffer.endswith(text[-50:] if len(text) > 50 else text):
+            # Final message that's a subset of what we've already output, skip
+            pass
         else:
-            # Different content, output all
+            # New delta content, output and append to buffer
             self._write(self._colorize(text, OutputType.ASSISTANT))
             self.state.chars_generated += len(text)
-            self.state.assistant_buffer = text
+            self.state.assistant_buffer += text
 
     def _handle_tool_call(self, data: dict, subtype: str):
         """Handle tool_call type messages."""

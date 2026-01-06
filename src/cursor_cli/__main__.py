@@ -35,7 +35,10 @@ import json
 import argparse
 import subprocess
 from pathlib import Path
-from .runner import CursorCLIRunner
+from io import StringIO
+from .runner import CursorCLIRunner, create_chat
+from .formatter import StreamJsonFormatter
+from . import session as session_mgr
 
 
 # Default permissions to ensure in cli-config.json
@@ -118,6 +121,14 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Install cursor-agent CLI and setup PATH environment variable",
     )
+    runner_group.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        nargs="?",
+        const="__LAST_SESSION__",
+        help="Resume a previous session. If no session ID provided, "
+        "resumes the last session from this shell.",
+    )
 
     return parser
 
@@ -133,19 +144,22 @@ def install_cursor_agent() -> int:
     try:
         # Check if cursor-agent is already installed
         print("Checking for existing cursor-agent installation...")
-        check_result = subprocess.run(
-            ["cursor-agent", "--help"],
-            capture_output=True,
-            check=False,
-        )
-
-        if check_result.returncode == 0:
-            print("✓ cursor-agent is already installed!")
-            print("\nTo check the version, run:")
-            print("  cursor-agent --version")
-            print("\nTo update to the latest version, run:")
-            print("  cursor-agent update")
-            return 0
+        try:
+            check_result = subprocess.run(
+                ["cursor-agent", "--help"],
+                capture_output=True,
+                check=False,
+            )
+            if check_result.returncode == 0:
+                print("✓ cursor-agent is already installed!")
+                print("\nTo check the version, run:")
+                print("  cursor-agent --version")
+                print("\nTo update to the latest version, run:")
+                print("  cursor-agent update")
+                return 0
+        except FileNotFoundError:
+            # cursor-agent not found, proceed with installation
+            pass
 
         print("cursor-agent not found, proceeding with installation...")
         print("-" * 40)
@@ -319,11 +333,15 @@ def expand_args(runner_args, cursor_args: list) -> list:
 
     --text "prompt" expands to:
         --output-format text -p "prompt"
+
+    Note: --resume is handled separately in run_with_session_management
     """
+    expanded = []
+
     # Check if --text mode is requested
     if runner_args.text is not None:
         # Text mode
-        expanded = ["--output-format", "text"]
+        expanded.extend(["--output-format", "text"])
 
         # Add prompt: either from --text value or from positional prompt
         if runner_args.text != "__TEXT_MODE__":
@@ -337,13 +355,14 @@ def expand_args(runner_args, cursor_args: list) -> list:
 
     # Default: streaming mode
     if runner_args.prompt:
-        expanded = ["--output-format", "stream-json", "--stream-partial-output"]
+        expanded.extend(["--output-format", "stream-json", "--stream-partial-output"])
         expanded.extend(["-p", runner_args.prompt])
         expanded.extend(cursor_args)
         return expanded
 
     # No prompt provided, just pass through cursor_args
-    return cursor_args
+    expanded.extend(cursor_args)
+    return expanded
 
 
 def is_subcommand(argv: list) -> bool:
@@ -363,6 +382,195 @@ def is_subcommand(argv: list) -> bool:
     if first_arg.startswith("-"):
         return False
     return first_arg in CURSOR_AGENT_SUBCOMMANDS
+
+
+def run_with_session_management(
+    cursor_args: list,
+    prompt: str,
+    resume_id: str | None,
+    use_colors: bool,
+    format_output: bool,
+) -> int:
+    """
+    Run cursor-agent with session management.
+
+    Creates/resumes sessions and saves conversation logs.
+
+    Args:
+        cursor_args: Arguments to pass to cursor-agent
+        prompt: The user prompt
+        resume_id: Session ID to resume (or "__LAST_SESSION__" or None)
+        use_colors: Whether to use colored output
+        format_output: Whether to format stream-json output
+
+    Returns:
+        Exit code
+    """
+    import subprocess
+    import threading
+    from typing import List, TextIO
+
+    workspace = os.getcwd()
+
+    # Determine session ID
+    session_id: str | None = None
+    is_new_session = False
+
+    if resume_id == "__LAST_SESSION__":
+        session_id = session_mgr.get_last_session_id(workspace)
+        if not session_id:
+            # No previous session, create new one
+            print(
+                "Warning: No previous session found for this shell. "
+                "Starting a new session.",
+                file=sys.stderr,
+            )
+            is_new_session = True
+    elif resume_id:
+        session_id = resume_id
+    else:
+        # Check if --resume is already in cursor_args
+        for i, arg in enumerate(cursor_args):
+            if arg.startswith("--resume="):
+                session_id = arg.split("=", 1)[1]
+                break
+            elif arg == "--resume" and i + 1 < len(cursor_args):
+                session_id = cursor_args[i + 1]
+                break
+
+        if not session_id:
+            is_new_session = True
+
+    # Create new session if needed
+    if is_new_session:
+        session_id = create_chat(workspace)
+
+    assert session_id is not None
+
+    # Add --resume to args if not already there
+    has_resume = any(
+        arg.startswith("--resume=") or arg == "--resume"
+        for arg in cursor_args
+    )
+    if not has_resume:
+        cursor_args = [f"--resume={session_id}"] + cursor_args
+
+    # Update session tracking
+    session_mgr.set_last_session_id(session_id, workspace)
+    if is_new_session:
+        session_mgr.update_index(session_id, prompt, workspace)
+        session_mgr.cleanup_stale_sessions(workspace)
+
+    # Build command
+    cmd = ["cursor-agent"] + cursor_args
+
+    # Create conversation file immediately for real-time writing
+    conv_writer = session_mgr.ConversationWriter(session_id, prompt, workspace)
+
+    # Collect stderr in a separate thread
+    stderr_chunks: List[str] = []
+
+    def read_stderr(pipe: TextIO) -> None:
+        try:
+            for line in pipe:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        assert process.stdout is not None
+        assert process.stderr is not None
+
+        # Start stderr reader thread
+        stderr_thread = threading.Thread(
+            target=read_stderr, args=(process.stderr,), daemon=True
+        )
+        stderr_thread.start()
+
+        # Determine if we should format output
+        is_stream_json = "--output-format" in cursor_args and any(
+            "stream-json" in arg for arg in cursor_args
+        )
+        should_format = format_output and is_stream_json
+
+        if should_format:
+            # Use formatter for display, and a capture formatter for file writing
+            display_formatter = StreamJsonFormatter(
+                output=sys.stdout, use_colors=use_colors
+            )
+            # Create a wrapper that writes to the conversation file
+            file_buffer = StringIO()
+            capture_formatter = StreamJsonFormatter(
+                output=file_buffer, use_colors=False
+            )
+
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    display_formatter.process_line(line)
+                    # Capture formatted output
+                    old_pos = file_buffer.tell()
+                    capture_formatter.process_line(line)
+                    # Write any new content to file in real-time
+                    new_pos = file_buffer.tell()
+                    if new_pos > old_pos:
+                        file_buffer.seek(old_pos)
+                        new_content = file_buffer.read()
+                        conv_writer.write(new_content)
+
+            display_formatter.finalize()
+            # Capture final content
+            old_pos = file_buffer.tell()
+            capture_formatter.finalize()
+            new_pos = file_buffer.tell()
+            if new_pos > old_pos:
+                file_buffer.seek(old_pos)
+                new_content = file_buffer.read()
+                conv_writer.write(new_content)
+
+            file_buffer.close()
+        else:
+            # Raw output - write directly to both stdout and file
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    conv_writer.write(line)
+
+        # Wait for stderr thread
+        stderr_thread.join(timeout=1.0)
+
+        # Print any stderr
+        stderr_output = "".join(stderr_chunks)
+        if stderr_output:
+            sys.stderr.write(stderr_output)
+            sys.stderr.flush()
+
+        return process.returncode or 0
+
+    except FileNotFoundError:
+        sys.stderr.write(
+            "Error: cursor-agent not found. Please ensure it's installed and in PATH.\n"
+        )
+        return 1
+    except Exception as e:
+        sys.stderr.write(f"Error running cursor-agent: {e}\n")
+        return 1
+    finally:
+        conv_writer.close()
 
 
 def main(argv: list | None = None) -> int:
@@ -421,6 +629,17 @@ def main(argv: list | None = None) -> int:
         print(
             "  cursor-cli --install                       # install cursor-agent and setup PATH"
         )
+        print(
+            '  cursor-cli --resume "Continue..."          # resume last session from this shell'
+        )
+        print(
+            '  cursor-cli --resume abc123 "Continue..."   # resume specific session'
+        )
+        print("\nSession Management:")
+        print("  Conversations are saved to .cursor-cli/ in your workspace:")
+        print("    .cursor-cli/index.md              # index of all sessions")
+        print("    .cursor-cli/<session_id>/         # session directory")
+        print("    .cursor-cli/<session_id>/*.md     # conversation logs")
         return 0
 
     # Expand shorthand args
@@ -429,10 +648,30 @@ def main(argv: list | None = None) -> int:
     # Show cursor-agent help if --help is in cursor_args
     if "--help" in cursor_args or "-h" in cursor_args:
         # Pass through to cursor-agent
-        pass
+        runner = CursorCLIRunner(use_colors=not runner_args.no_color)
+        return runner.run(cursor_args, format_output=False)
 
-    # If no arguments, show our help
-    if not cursor_args:
+    # Check if we're using the simplified mode (with prompt)
+    # In this case, we handle session management
+    prompt = runner_args.prompt or (
+        runner_args.text if runner_args.text and runner_args.text != "__TEXT_MODE__" else None
+    )
+
+    # Check if --resume was given with what looks like a prompt
+    # (e.g., "cursor-cli --resume 'What did I say?'")
+    resume_as_prompt = None
+    if runner_args.resume and runner_args.resume != "__LAST_SESSION__":
+        # If resume value contains spaces or is long, it's likely a prompt
+        if " " in runner_args.resume or len(runner_args.resume) > 50:
+            resume_as_prompt = runner_args.resume
+            # Add streaming format and prompt to cursor_args
+            cursor_args = [
+                "--output-format", "stream-json", "--stream-partial-output",
+                "-p", resume_as_prompt
+            ] + cursor_args
+
+    # If no arguments and no resume-as-prompt, show help
+    if not cursor_args and not prompt and not resume_as_prompt and not runner_args.resume:
         parser.print_help()
         print("\n" + "=" * 60)
         print("No arguments provided. Run 'cursor-agent --help' for options.")
@@ -440,10 +679,19 @@ def main(argv: list | None = None) -> int:
         print('  cursor-cli "Your prompt here"')
         return 0
 
-    # Create and run
-    runner = CursorCLIRunner(use_colors=not runner_args.no_color)
-
-    return runner.run(cursor_args, format_output=not runner_args.no_format)
+    if prompt or resume_as_prompt or runner_args.resume:
+        # Simplified mode with session management
+        return run_with_session_management(
+            cursor_args=cursor_args,
+            prompt=prompt or resume_as_prompt,
+            resume_id="__LAST_SESSION__" if resume_as_prompt else runner_args.resume,
+            use_colors=not runner_args.no_color,
+            format_output=not runner_args.no_format,
+        )
+    else:
+        # Direct passthrough mode (no session management)
+        runner = CursorCLIRunner(use_colors=not runner_args.no_color)
+        return runner.run(cursor_args, format_output=not runner_args.no_format)
 
 
 if __name__ == "__main__":

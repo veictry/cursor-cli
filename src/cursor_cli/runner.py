@@ -10,8 +10,21 @@ import subprocess
 import sys
 import shlex
 import json as json_module
+import threading
+from io import StringIO
 from typing import List, Optional, TextIO, Union, Iterator, Any
 from .formatter import StreamJsonFormatter
+from . import session as session_mgr
+
+
+# Sentinel value to distinguish "not set" from "explicitly set to None"
+class _Unset:
+    """Sentinel class for unset parameter values."""
+
+    pass
+
+
+_OUTPUT_UNSET = _Unset()
 
 
 class CursorCLIRunner:
@@ -251,8 +264,10 @@ def cursor_cli(
     json: bool = True,
     workspace: Optional[str] = None,
     chat_id: Optional[str] = None,
+    output_to: Union[None, bool, str, TextIO, _Unset] = _OUTPUT_UNSET,
+    save_session: bool = True,
     **extra_args,
-) -> Union[str, dict, Iterator[str]]:
+) -> Union[str, dict, Iterator[str], None]:
     """
     Run cursor-agent with the given prompt and return the output.
 
@@ -263,9 +278,17 @@ def cursor_cli(
         json: If True, return output as parsed JSON dict (default: True)
         workspace: Workspace directory (default: current directory)
         chat_id: Chat session ID to resume (default: creates new chat)
+        output_to: Output destination for streaming (automatically enables stream=True):
+            - Not set (default): Normal behavior based on stream/json parameters
+            - None: Silent mode, runs streaming but doesn't output anywhere
+            - True or sys.stdout: Print to stdout in real-time
+            - TextIO object: Write to the specified stream in real-time
+            - str (file path): Write to the specified file in real-time
+        save_session: If True (default), save conversation to .cursor-cli directory
         **extra_args: Additional arguments to pass to cursor-agent
 
     Returns:
+        - If output_to is set: None (output is already written to the destination)
         - If stream=True: Iterator[str] yielding JSON lines
         - If json=True: dict with parsed JSON response
         - Otherwise: str with text output
@@ -283,9 +306,18 @@ def cursor_cli(
         result = cursor_cli("Hello", json=False)
         print(result)
 
-        # Streaming output
+        # Streaming output (manual iteration)
         for line in cursor_cli("Explain Python", stream=True):
             print(line)
+
+        # Auto-print to stdout (no manual iteration needed)
+        cursor_cli("Explain Python", output_to=True)
+
+        # Auto-print to a file
+        cursor_cli("Explain Python", output_to="/path/to/output.txt")
+
+        # Silent mode (run but don't output)
+        cursor_cli("Do something", output_to=None)
 
         # With specific workspace
         result = cursor_cli("Analyze this", workspace="/path/to/project")
@@ -297,9 +329,26 @@ def cursor_cli(
     if workspace is None:
         workspace = os.getcwd()
 
+    # Track if this is a new session
+    is_new_session = chat_id is None
+
     # Create chat if not provided
     if chat_id is None:
         chat_id = create_chat(workspace)
+
+    # Save session ID for this shell and update index if new session
+    if save_session:
+        session_mgr.set_last_session_id(chat_id, workspace)
+        if is_new_session:
+            session_mgr.update_index(chat_id, prompt, workspace)
+            # Periodically cleanup stale shell sessions
+            session_mgr.cleanup_stale_sessions(workspace)
+
+    # Check if output_to is set (not the sentinel value)
+    use_output_to = not isinstance(output_to, _Unset)
+    if use_output_to:
+        # Force streaming mode when output_to is set
+        stream = True
 
     # Build command arguments
     cmd = [
@@ -328,10 +377,59 @@ def cursor_cli(
         else:
             cmd.append(f"--{arg_name}={value}")
 
-    if stream:
-        return _run_streaming(cmd)
+    if use_output_to:
+        # Auto-consume streaming and write to destination, capture for saving
+        captured_output = _run_streaming_with_output(cmd, output_to)
+        if save_session and captured_output:
+            session_mgr.save_conversation(chat_id, prompt, captured_output, workspace)
+        return None
+    elif stream:
+        # For streaming mode, wrap the generator to save after consumption
+        return _create_saving_generator(
+            _run_streaming(cmd), chat_id, prompt, workspace, save_session
+        )
     else:
-        return _run_blocking(cmd, parse_json=json)
+        result = _run_blocking(cmd, parse_json=json)
+        if save_session:
+            # Save the output (convert to string if needed)
+            output_str = (
+                json_module.dumps(result, ensure_ascii=False, indent=2)
+                if isinstance(result, dict)
+                else str(result)
+            )
+            session_mgr.save_conversation(chat_id, prompt, output_str, workspace)
+        return result
+
+
+def _create_saving_generator(
+    gen: Iterator[str],
+    chat_id: str,
+    prompt: str,
+    workspace: str,
+    save_session: bool,
+) -> Iterator[str]:
+    """
+    Wrap a generator to save conversation after it's fully consumed.
+
+    Args:
+        gen: The original generator
+        chat_id: Session ID
+        prompt: User prompt
+        workspace: Workspace directory
+        save_session: Whether to save the session
+
+    Yields:
+        str: Lines from the original generator
+    """
+    lines = []
+    try:
+        for line in gen:
+            lines.append(line)
+            yield line
+    finally:
+        if save_session and lines:
+            output = "\n".join(lines)
+            session_mgr.save_conversation(chat_id, prompt, output, workspace)
 
 
 def _run_blocking(cmd: List[str], parse_json: bool = False) -> Union[str, dict]:
@@ -374,6 +472,17 @@ def _run_streaming(cmd: List[str]) -> Iterator[str]:
     Yields:
         str: Each line of JSON output
     """
+    # Collect stderr in a separate thread to avoid deadlock
+    stderr_chunks: List[str] = []
+
+    def read_stderr(pipe: TextIO) -> None:
+        """Read stderr in a separate thread to prevent buffer deadlock."""
+        try:
+            for line in pipe:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
     try:
         process = subprocess.Popen(
             cmd,
@@ -386,6 +495,12 @@ def _run_streaming(cmd: List[str]) -> Iterator[str]:
         assert process.stdout is not None
         assert process.stderr is not None
 
+        # Start stderr reader thread to prevent deadlock
+        stderr_thread = threading.Thread(
+            target=read_stderr, args=(process.stderr,), daemon=True
+        )
+        stderr_thread.start()
+
         # Yield lines as they come
         while True:
             line = process.stdout.readline()
@@ -394,8 +509,11 @@ def _run_streaming(cmd: List[str]) -> Iterator[str]:
             if line:
                 yield line.rstrip("\n")
 
+        # Wait for stderr thread to finish
+        stderr_thread.join(timeout=1.0)
+
         # Check for errors after completion
-        stderr_output = process.stderr.read()
+        stderr_output = "".join(stderr_chunks)
         if process.returncode != 0:
             raise RuntimeError(
                 f"cursor-agent failed with exit code {process.returncode}: {stderr_output}"
@@ -405,3 +523,122 @@ def _run_streaming(cmd: List[str]) -> Iterator[str]:
         raise FileNotFoundError(
             "cursor-agent not found. Please ensure it's installed and in PATH."
         )
+
+
+def _run_streaming_with_output(
+    cmd: List[str],
+    output: Union[None, bool, str, TextIO],
+) -> Optional[str]:
+    """
+    Run cursor-agent with streaming output and automatically write to destination.
+
+    Uses StreamJsonFormatter to format output with aggregated sections (similar to
+    --stream mode in CLI), making output more readable.
+
+    Args:
+        cmd: Command to execute
+        output: Output destination:
+            - None: Silent mode, don't output anywhere
+            - True: Output to sys.stdout
+            - TextIO: Output to the specified stream
+            - str: Output to file at this path
+
+    Returns:
+        Captured output string for saving, or None if no formatter was used
+    """
+    # Determine the actual output stream
+    should_close = False
+    out_stream: Optional[TextIO] = None
+    formatter: Optional[StreamJsonFormatter] = None
+    # Capture output to a buffer for saving
+    capture_buffer = StringIO()
+    capture_formatter: Optional[StreamJsonFormatter] = None
+
+    if output is None or output is False:
+        # Silent mode - still capture for saving
+        capture_formatter = StreamJsonFormatter(output=capture_buffer, use_colors=False)
+        formatter = None
+    elif output is True:
+        formatter = StreamJsonFormatter(output=sys.stdout, use_colors=True)
+        capture_formatter = StreamJsonFormatter(output=capture_buffer, use_colors=False)
+    elif isinstance(output, str):
+        out_stream = open(output, "w")
+        should_close = True
+        # File output - disable colors
+        formatter = StreamJsonFormatter(output=out_stream, use_colors=False)
+        capture_formatter = StreamJsonFormatter(output=capture_buffer, use_colors=False)
+    else:
+        # Assume it's a TextIO-like object
+        out_stream = output
+        # Check if output supports colors (is a tty)
+        use_colors = hasattr(out_stream, "isatty") and out_stream.isatty()
+        formatter = StreamJsonFormatter(output=out_stream, use_colors=use_colors)
+        capture_formatter = StreamJsonFormatter(output=capture_buffer, use_colors=False)
+
+    # Collect stderr in a separate thread to avoid deadlock
+    stderr_chunks: List[str] = []
+
+    def read_stderr(pipe: TextIO) -> None:
+        """Read stderr in a separate thread to prevent buffer deadlock."""
+        try:
+            for line in pipe:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line-buffered
+        )
+
+        assert process.stdout is not None
+        assert process.stderr is not None
+
+        # Start stderr reader thread to prevent deadlock
+        stderr_thread = threading.Thread(
+            target=read_stderr, args=(process.stderr,), daemon=True
+        )
+        stderr_thread.start()
+
+        # Stream lines and format output using StreamJsonFormatter
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                if formatter is not None:
+                    formatter.process_line(line)
+                if capture_formatter is not None:
+                    capture_formatter.process_line(line)
+
+        # Wait for stderr thread to finish
+        stderr_thread.join(timeout=1.0)
+
+        # Finalize the formatters
+        if formatter is not None:
+            formatter.finalize()
+        if capture_formatter is not None:
+            capture_formatter.finalize()
+
+        # Check for errors after completion
+        stderr_output = "".join(stderr_chunks)
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"cursor-agent failed with exit code {process.returncode}: {stderr_output}"
+            )
+
+        # Return captured output
+        return capture_buffer.getvalue()
+
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            "cursor-agent not found. Please ensure it's installed and in PATH."
+        )
+    finally:
+        if should_close and out_stream is not None:
+            out_stream.close()
+        capture_buffer.close()

@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-01-06
+
+### Added
+
+- **Session Management**: Automatic conversation logging with hybrid storage
+
+  - SQLite database (`sessions.db`) for session index and shell session tracking
+  - Markdown files for conversation content (human-readable, easy to search)
+  - Directory structure: `.cursor-cli/{session_id}/{timestamp}.md`
+  - Real-time writing: conversation files are created immediately and updated in real-time
+  - `ConversationWriter` class for streaming conversation content to files
+
+- **Shell Session Tracking**: Resume conversations without remembering session IDs
+
+  - `--resume` without arguments resumes the last session from current shell
+  - `--resume "prompt"` intelligently detects if argument is a prompt (contains spaces or is long)
+  - Tracks shell PID to session ID mapping in SQLite
+
+- **New Python API functions**:
+
+  - `list_sessions()` - List all sessions (newest first)
+  - `get_session()` - Get session info by ID
+  - `search_sessions()` - Search sessions by initial prompt
+  - `get_conversation_files()` - Get conversation files for a session
+  - `read_conversation()` - Read a conversation file
+  - `ConversationWriter` - Class for real-time conversation file writing
+
+- **`output_to` parameter** in `cursor_cli()` function:
+
+  - `output_to=True` - Auto-print to stdout (no manual iteration needed)
+  - `output_to="/path/to/file"` - Write to file in real-time
+  - `output_to=None` - Silent mode (run but don't output)
+
+- **`save_session` parameter** in `cursor_cli()` function to control conversation saving
+
+### Fixed
+
+- Fixed `--install` failing with `FileNotFoundError` when cursor-agent is not installed
+- Fixed assistant text duplication in formatter when cursor-agent sends accumulated content
+- Fixed potential stderr deadlock by reading stderr in a separate thread
+
+### Changed
+
+- Conversation files are now written in real-time instead of after conversation ends
+- Session tracking uses parent process ID (PPID) to identify shells
+
 ## [0.1.6] - 2024-12-09
 
 ### Changed
