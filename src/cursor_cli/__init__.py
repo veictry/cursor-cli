@@ -8,6 +8,7 @@ from .session import (
     get_last_session_id,
     set_last_session_id,
     get_locked_session_id,
+    get_locked_session_id_for_shell,
     set_session_lock,
     clear_session_lock,
     list_sessions,
@@ -18,7 +19,7 @@ from .session import (
     ConversationWriter,
 )
 
-__version__ = "0.1.10"
+__version__ = "0.1.11"
 __all__ = [
     "CursorCLIRunner",
     "StreamJsonFormatter",

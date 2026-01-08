@@ -465,17 +465,21 @@ def get_shell_pid() -> str:
     return str(os.getppid())
 
 
-def get_last_session_id(workspace: Optional[str] = None) -> Optional[str]:
+def get_last_session_id(
+    workspace: Optional[str] = None, shell_pid: Optional[str] = None
+) -> Optional[str]:
     """
-    Get the last session ID for the current shell.
+    Get the last session ID for a shell.
 
     Args:
         workspace: Workspace directory
+        shell_pid: Shell process ID (default: current shell)
 
     Returns:
         The last session ID, or None if not found
     """
-    shell_pid = get_shell_pid()
+    if shell_pid is None:
+        shell_pid = get_shell_pid()
 
     with get_db_connection(workspace) as conn:
         cursor = conn.cursor()
@@ -486,6 +490,34 @@ def get_last_session_id(workspace: Optional[str] = None) -> Optional[str]:
         row = cursor.fetchone()
         if row:
             return row["session_id"]
+        return None
+
+
+def get_locked_session_id_for_shell(
+    workspace: Optional[str] = None, shell_pid: Optional[str] = None
+) -> Optional[str]:
+    """
+    Get the locked session ID for a specific shell.
+
+    Args:
+        workspace: Workspace directory
+        shell_pid: Shell process ID (default: current shell)
+
+    Returns:
+        The locked session ID, or None if not locked
+    """
+    if shell_pid is None:
+        shell_pid = get_shell_pid()
+
+    with get_db_connection(workspace) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT locked_session_id FROM shell_sessions WHERE shell_pid = ?",
+            (shell_pid,),
+        )
+        row = cursor.fetchone()
+        if row and row["locked_session_id"]:
+            return row["locked_session_id"]
         return None
 
 

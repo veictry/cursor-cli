@@ -143,8 +143,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     runner_group.add_argument(
         "--last-chat-id",
-        action="store_true",
-        help="Show the last chat_id for this shell session.",
+        nargs="?",
+        const="__CURRENT_SHELL__",
+        metavar="SHELL_PID",
+        help="Show the last chat_id for a shell session. "
+        "If no SHELL_PID provided, shows info for current shell.",
     )
 
     return parser
@@ -447,18 +450,16 @@ def run_with_session_management(
 
     workspace = os.getcwd()
 
-    # Check for locked session first
+    # Check for locked session
     locked_session = session_mgr.get_locked_session_id(workspace)
 
     # Determine session ID
+    # Priority: explicit --resume > locked session > new session
     session_id: str | None = None
     is_new_session = False
 
-    if locked_session:
-        # Use locked session - ignore resume_id
-        session_id = locked_session
-        print(f"[🔒 Using locked session: {session_id}]", file=sys.stderr)
-    elif resume_id == "__LAST_SESSION__":
+    if resume_id == "__LAST_SESSION__":
+        # --resume without argument: use last session from this shell
         session_id = session_mgr.get_last_session_id(workspace)
         if not session_id:
             # No previous session, create new one
@@ -469,6 +470,7 @@ def run_with_session_management(
             )
             is_new_session = True
     elif resume_id:
+        # Explicit --resume <chat_id>: use the specified session
         session_id = resume_id
     else:
         # Check if --resume is already in cursor_args
@@ -481,7 +483,12 @@ def run_with_session_management(
                 break
 
         if not session_id:
-            is_new_session = True
+            # No --resume specified, check for locked session
+            if locked_session:
+                session_id = locked_session
+                print(f"[🔒 Using locked session: {session_id}]", file=sys.stderr)
+            else:
+                is_new_session = True
 
     # Create new session if needed
     if is_new_session:
@@ -652,17 +659,25 @@ def main(argv: list | None = None) -> int:
         return setup_danger_permissions(folder_path)
 
     # Handle --last-chat-id
-    if runner_args.last_chat_id:
+    if runner_args.last_chat_id is not None:
         workspace = os.getcwd()
-        session_id = session_mgr.get_last_session_id(workspace)
-        locked_id = session_mgr.get_locked_session_id(workspace)
+        # Determine which shell to query
+        if runner_args.last_chat_id == "__CURRENT_SHELL__":
+            shell_pid = None  # Will use current shell
+            shell_label = "this shell"
+        else:
+            shell_pid = runner_args.last_chat_id
+            shell_label = f"shell {shell_pid}"
+
+        session_id = session_mgr.get_last_session_id(workspace, shell_pid)
+        locked_id = session_mgr.get_locked_session_id_for_shell(workspace, shell_pid)
         if session_id:
             if locked_id:
                 print(f"{session_id} (🔒 locked to: {locked_id})")
             else:
                 print(session_id)
         else:
-            print("No session found for this shell.")
+            print(f"No session found for {shell_label}.")
         return 0
 
     # Handle --session (lock/unlock)

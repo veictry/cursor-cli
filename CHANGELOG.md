@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-01-08
+
+### Added
+
+- **`get_locked_session_id_for_shell()` function**: Query locked session for a specific shell PID
+- **`--last-chat-id [SHELL_PID]` enhancement**: Now accepts optional SHELL_PID to query other shells
+
+### Fixed
+
+- Fixed session priority: `--resume` now takes precedence over locked session (previously locked session always won)
+
 ## [0.1.10] - 2026-01-08
 
 ### Added
@@ -18,12 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - While locked, all commands in this shell use the same chat_id
   - Lock state is persisted in `sessions.db`
 
-- **`--last-chat-id` option**: Show the last chat_id for current shell
+- **`--last-chat-id` option**: Show the last chat_id for a shell session
   - Displays the session ID with lock status if applicable
+  - Supports optional `SHELL_PID` parameter to query other shells: `--last-chat-id <pid>`
 
 ### Fixed
 
 - Fixed `--help` output order: now shows cursor-cli options first, then cursor-agent options
+- Fixed session priority: `--resume` now takes precedence over locked session
 
 ## [0.1.9] - 2026-01-06
 
