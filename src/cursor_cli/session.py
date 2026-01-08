@@ -111,10 +111,19 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
             shell_pid TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            locked_session_id TEXT,
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     """
     )
+
+    # Add locked_session_id column if not exists (migration)
+    try:
+        cursor.execute(
+            "ALTER TABLE shell_sessions ADD COLUMN locked_session_id TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Create index for common queries
     cursor.execute(
@@ -493,13 +502,123 @@ def set_last_session_id(session_id: str, workspace: Optional[str] = None) -> Non
 
     with get_db_connection(workspace) as conn:
         cursor = conn.cursor()
+        # Preserve locked_session_id if exists
+        cursor.execute(
+            "SELECT locked_session_id FROM shell_sessions WHERE shell_pid = ?",
+            (shell_pid,),
+        )
+        row = cursor.fetchone()
+        locked_session_id = row["locked_session_id"] if row else None
+
         cursor.execute(
             """
-            INSERT OR REPLACE INTO shell_sessions (shell_pid, session_id, updated_at)
-            VALUES (?, ?, ?)
+            INSERT OR REPLACE INTO shell_sessions 
+            (shell_pid, session_id, updated_at, locked_session_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (shell_pid, session_id, timestamp),
+            (shell_pid, session_id, timestamp, locked_session_id),
         )
+
+
+def get_locked_session_id(workspace: Optional[str] = None) -> Optional[str]:
+    """
+    Get the locked session ID for the current shell.
+
+    Args:
+        workspace: Workspace directory
+
+    Returns:
+        The locked session ID, or None if not locked
+    """
+    shell_pid = get_shell_pid()
+
+    with get_db_connection(workspace) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT locked_session_id FROM shell_sessions WHERE shell_pid = ?",
+            (shell_pid,),
+        )
+        row = cursor.fetchone()
+        if row and row["locked_session_id"]:
+            return row["locked_session_id"]
+        return None
+
+
+def set_session_lock(
+    session_id: str, workspace: Optional[str] = None
+) -> None:
+    """
+    Lock the current shell to a specific session ID.
+
+    Args:
+        session_id: The session ID to lock to
+        workspace: Workspace directory
+    """
+    shell_pid = get_shell_pid()
+    timestamp = datetime.now().isoformat()
+
+    with get_db_connection(workspace) as conn:
+        cursor = conn.cursor()
+        # Check if row exists
+        cursor.execute(
+            "SELECT session_id FROM shell_sessions WHERE shell_pid = ?",
+            (shell_pid,),
+        )
+        row = cursor.fetchone()
+
+        if row:
+            cursor.execute(
+                """
+                UPDATE shell_sessions 
+                SET locked_session_id = ?, updated_at = ?
+                WHERE shell_pid = ?
+                """,
+                (session_id, timestamp, shell_pid),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO shell_sessions 
+                (shell_pid, session_id, updated_at, locked_session_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (shell_pid, session_id, timestamp, session_id),
+            )
+
+
+def clear_session_lock(workspace: Optional[str] = None) -> Optional[str]:
+    """
+    Clear the session lock for the current shell.
+
+    Args:
+        workspace: Workspace directory
+
+    Returns:
+        The previously locked session ID, or None if wasn't locked
+    """
+    shell_pid = get_shell_pid()
+    timestamp = datetime.now().isoformat()
+
+    with get_db_connection(workspace) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT locked_session_id FROM shell_sessions WHERE shell_pid = ?",
+            (shell_pid,),
+        )
+        row = cursor.fetchone()
+        old_locked = row["locked_session_id"] if row else None
+
+        if row:
+            cursor.execute(
+                """
+                UPDATE shell_sessions 
+                SET locked_session_id = NULL, updated_at = ?
+                WHERE shell_pid = ?
+                """,
+                (timestamp, shell_pid),
+            )
+
+        return old_locked
 
 
 def cleanup_stale_sessions(workspace: Optional[str] = None) -> int:

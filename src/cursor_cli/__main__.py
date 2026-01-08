@@ -133,6 +133,19 @@ def create_parser() -> argparse.ArgumentParser:
         help="Read task from a file. The prompt will be: "
         "'请尝试完成 {absolute_path} 中的任务'",
     )
+    runner_group.add_argument(
+        "--session",
+        nargs="?",
+        const="__TOGGLE__",
+        metavar="CHAT_ID",
+        help="Lock shell to a chat_id. Use 'new' to create a new session. "
+        "Run again without args to unlock.",
+    )
+    runner_group.add_argument(
+        "--last-chat-id",
+        action="store_true",
+        help="Show the last chat_id for this shell session.",
+    )
 
     return parser
 
@@ -434,11 +447,18 @@ def run_with_session_management(
 
     workspace = os.getcwd()
 
+    # Check for locked session first
+    locked_session = session_mgr.get_locked_session_id(workspace)
+
     # Determine session ID
     session_id: str | None = None
     is_new_session = False
 
-    if resume_id == "__LAST_SESSION__":
+    if locked_session:
+        # Use locked session - ignore resume_id
+        session_id = locked_session
+        print(f"[🔒 Using locked session: {session_id}]", file=sys.stderr)
+    elif resume_id == "__LAST_SESSION__":
         session_id = session_mgr.get_last_session_id(workspace)
         if not session_id:
             # No previous session, create new one
@@ -631,6 +651,64 @@ def main(argv: list | None = None) -> int:
             folder_path = runner_args.danger
         return setup_danger_permissions(folder_path)
 
+    # Handle --last-chat-id
+    if runner_args.last_chat_id:
+        workspace = os.getcwd()
+        session_id = session_mgr.get_last_session_id(workspace)
+        locked_id = session_mgr.get_locked_session_id(workspace)
+        if session_id:
+            if locked_id:
+                print(f"{session_id} (🔒 locked to: {locked_id})")
+            else:
+                print(session_id)
+        else:
+            print("No session found for this shell.")
+        return 0
+
+    # Handle --session (lock/unlock)
+    if runner_args.session is not None:
+        workspace = os.getcwd()
+        current_locked = session_mgr.get_locked_session_id(workspace)
+
+        if runner_args.session == "__TOGGLE__":
+            # No chat_id specified - toggle lock
+            if current_locked:
+                # Currently locked, unlock it
+                session_mgr.clear_session_lock(workspace)
+                print(f"🔓 Session unlocked (was: {current_locked})")
+                print("New commands will create new sessions.")
+            else:
+                # Not locked, try to lock to last session
+                last_session = session_mgr.get_last_session_id(workspace)
+                if last_session:
+                    session_mgr.set_session_lock(last_session, workspace)
+                    print(f"🔒 Session locked to: {last_session}")
+                    print("All commands in this shell will use this chat_id.")
+                else:
+                    # No previous session, create a new one
+                    new_session = create_chat(workspace)
+                    session_mgr.set_session_lock(new_session, workspace)
+                    session_mgr.set_last_session_id(new_session, workspace)
+                    print(f"🔒 Created and locked to new session: {new_session}")
+                    print("All commands in this shell will use this chat_id.")
+        elif runner_args.session.lower() == "new":
+            # Explicitly create a new session
+            new_session = create_chat(workspace)
+            session_mgr.set_session_lock(new_session, workspace)
+            session_mgr.set_last_session_id(new_session, workspace)
+            print(f"🔒 Created and locked to new session: {new_session}")
+            print("All commands in this shell will use this chat_id.")
+        else:
+            # Specific chat_id provided
+            chat_id = runner_args.session
+            session_mgr.set_session_lock(chat_id, workspace)
+            session_mgr.set_last_session_id(chat_id, workspace)
+            print(f"🔒 Session locked to: {chat_id}")
+            print("All commands in this shell will use this chat_id.")
+
+        print("\nRun 'cursor-cli --session' again to unlock.")
+        return 0
+
     # Show help if requested
     if runner_args.runner_help:
         parser.print_help()
@@ -668,11 +746,19 @@ def main(argv: list | None = None) -> int:
     # Expand shorthand args
     cursor_args = expand_args(runner_args, cursor_args)
 
-    # Show cursor-agent help if --help is in cursor_args
+    # Show help if --help is in cursor_args
     if "--help" in cursor_args or "-h" in cursor_args:
-        # Pass through to cursor-agent
-        runner = CursorCLIRunner(use_colors=not runner_args.no_color)
-        return runner.run(cursor_args, format_output=False)
+        # First show cursor-cli help
+        parser.print_help()
+        sys.stdout.flush()
+        print("\n" + "=" * 60)
+        print("cursor-agent options:")
+        print("=" * 60 + "\n")
+        sys.stdout.flush()
+        # Then show cursor-agent help
+        import subprocess
+        subprocess.run(["cursor-agent", "--help"], check=False)
+        return 0
 
     # Check if we're using the simplified mode (with prompt)
     # In this case, we handle session management

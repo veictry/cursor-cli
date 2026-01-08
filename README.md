@@ -35,6 +35,9 @@ python -m cursor_cli [args...]
 - **Formatted Stream-JSON Output**: The output is parsed and formatted for better readability
 - **Color-coded Output**: Different message types (system, user, thinking, assistant, tool_call) are displayed in different colors
 - **Aggregated Output**: Messages of the same type are aggregated together instead of being displayed on separate lines
+- **Session Management**: Automatic conversation logging with SQLite index and Markdown files
+- **Shell Session Tracking**: `--resume` without args resumes last session; `--session` locks to a chat_id
+- **File-based Tasks**: `--file` option to read task from a file
 - **Extended Permissions Setup**: `--danger` flag for setting up cursor-agent permissions
 - **One-click Installation**: `--install` flag for installing cursor-agent CLI and setting up PATH
 
@@ -74,6 +77,42 @@ This will:
 2. If not installed, run `curl https://cursor.com/install -fsS | bash`
 3. Add `$HOME/.local/bin` to PATH in `.bashrc` and/or `.zshrc`
 
+### Session Management
+
+```bash
+# 锁定当前 shell 到一个 chat_id（自动创建或使用上一个）
+cursor-cli --session
+
+# 锁定到新的 session
+cursor-cli --session new
+
+# 锁定到指定的 chat_id
+cursor-cli --session abc123
+
+# 再次运行解锁
+cursor-cli --session
+
+# 查看当前 shell 的最后一个 chat_id
+cursor-cli --last-chat-id
+
+# 继续上一次对话（无需记住 session ID）
+cursor-cli --resume "Continue from where we left off"
+```
+
+Session 数据存储在 `.cursor-cli/` 目录下：
+
+- `sessions.db` - SQLite 数据库，存储 session 索引和 shell session 追踪
+- `{session_id}/` - 每个 session 的对话记录目录
+- `{session_id}/{timestamp}.md` - Markdown 格式的对话记录
+
+### File-based Tasks
+
+```bash
+# 从文件读取任务
+cursor-cli --file /path/to/task.txt
+# 等效于: cursor-cli "请尝试完成 /path/to/task.txt 中的任务"
+```
+
 ### Danger Mode (Extended Permissions)
 
 Setup extended permissions for cursor-agent in `.cursor/cli-config.json`:
@@ -86,7 +125,7 @@ cursor-cli --danger
 cursor-cli --danger /path/to/project
 ```
 
-This will create/update the config file with these permissions:
+在不同目录运行 `--danger` 会累加 Write 权限：
 
 ```json
 {
@@ -95,7 +134,9 @@ This will create/update the config file with these permissions:
       "Shell(*)",
       "Read(*)",
       "Write(**/agents/**/*)",
-      "Write(**/.agents/**/*)"
+      "Write(**/.agents/**/*)",
+      "Write(/path/to/project1/**/*)",
+      "Write(/path/to/project2/**/*)"
     ],
     "deny": []
   }
@@ -134,9 +175,11 @@ print(result)
 result = cursor_cli("Hello", json=False)
 print(result)
 
-# Streaming output
-for line in cursor_cli("Explain Python", stream=True):
-    print(line)
+# Streaming output with auto-print
+cursor_cli("Explain Python", stream=True, output_to=True)
+
+# Write output to file in real-time
+cursor_cli("Analyze this", stream=True, output_to="/path/to/output.txt")
 
 # With specific workspace
 result = cursor_cli("Analyze this", workspace="/path/to/project")
@@ -145,6 +188,26 @@ result = cursor_cli("Analyze this", workspace="/path/to/project")
 chat_id = create_chat()
 result1 = cursor_cli("First question", chat_id=chat_id)
 result2 = cursor_cli("Follow up question", chat_id=chat_id)
+
+# Session management
+from cursor_cli import (
+    list_sessions, get_session, search_sessions,
+    get_conversation_files, read_conversation
+)
+
+# List recent sessions
+sessions = list_sessions(limit=10)
+for s in sessions:
+    print(f"{s['id']}: {s['initial_prompt'][:50]}...")
+
+# Search sessions by prompt
+results = search_sessions("analyze project")
+
+# Get conversation files for a session
+files = get_conversation_files("session-id-here")
+for f in files:
+    content = read_conversation(f)
+    print(content)
 
 # Using the runner class
 from cursor_cli import CursorCLIRunner
@@ -204,15 +267,19 @@ When formatting is enabled, the output is displayed as:
 
 ## CLI Options
 
-| Option            | Description                                     |
-| ----------------- | ----------------------------------------------- |
-| `"prompt"`        | Default streaming mode with formatted output    |
-| `--text "prompt"` | Text output mode                                |
-| `--install`       | Install cursor-agent CLI and setup PATH         |
-| `--danger [path]` | Setup extended permissions (default: ~/.cursor) |
-| `--no-color`      | Disable colored output                          |
-| `--no-format`     | Disable output formatting (raw JSON)            |
-| `--runner-help`   | Show help message                               |
+| Option                  | Description                                             |
+| ----------------------- | ------------------------------------------------------- |
+| `"prompt"`              | Default streaming mode with formatted output            |
+| `--text "prompt"`       | Text output mode                                        |
+| `--resume [session_id]` | Resume a session (no ID = last session from this shell) |
+| `--session [chat_id]`   | Lock shell to chat_id (`new` = create new session)      |
+| `--last-chat-id`        | Show the last chat_id for this shell                    |
+| `--file <path>`         | Read task from file                                     |
+| `--install`             | Install cursor-agent CLI and setup PATH                 |
+| `--danger [path]`       | Setup extended permissions (default: ~/.cursor)         |
+| `--no-color`            | Disable colored output                                  |
+| `--no-format`           | Disable output formatting (raw JSON)                    |
+| `--runner-help`         | Show help message                                       |
 
 ## API Reference
 
@@ -226,19 +293,23 @@ cursor_cli(
     json: bool = True,
     workspace: str = None,
     chat_id: str = None,
+    output_to: Union[bool, str, None] = None,
+    save_session: bool = True,
     **extra_args
 ) -> Union[str, dict, Iterator[str]]
 ```
 
-| 参数           | 类型        | 默认值         | 说明                             |
-| -------------- | ----------- | -------------- | -------------------------------- |
-| `prompt`       | str         | 必填           | 发送给 cursor-agent 的提示       |
-| `model`        | str         | `"composer-1"` | 使用的模型                       |
-| `stream`       | bool        | `False`        | 是否使用流式输出                 |
-| `json`         | bool        | `True`         | 是否返回 JSON 格式               |
-| `workspace`    | str \| None | 当前目录       | 工作区目录，等效于 `--workspace` |
-| `chat_id`      | str \| None | 自动创建       | Chat 会话 ID，等效于 `--resume`  |
-| `**extra_args` | -           | -              | 额外的命令行参数                 |
+| 参数           | 类型                | 默认值         | 说明                                     |
+| -------------- | ------------------- | -------------- | ---------------------------------------- |
+| `prompt`       | str                 | 必填           | 发送给 cursor-agent 的提示               |
+| `model`        | str                 | `"composer-1"` | 使用的模型                               |
+| `stream`       | bool                | `False`        | 是否使用流式输出                         |
+| `json`         | bool                | `True`         | 是否返回 JSON 格式                       |
+| `workspace`    | str \| None         | 当前目录       | 工作区目录，等效于 `--workspace`         |
+| `chat_id`      | str \| None         | 自动创建       | Chat 会话 ID，等效于 `--resume`          |
+| `output_to`    | bool \| str \| None | `None`         | `True`=打印到 stdout, `str`=写入文件路径 |
+| `save_session` | bool                | `True`         | 是否保存对话到 session 文件              |
+| `**extra_args` | -                   | -              | 额外的命令行参数                         |
 
 **返回值:**
 

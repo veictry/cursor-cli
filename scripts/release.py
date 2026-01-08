@@ -176,13 +176,23 @@ def main():
     
     # Get token
     print("\n" + "=" * 50)
-    if test_mode:
-        print("Enter your TestPyPI API token:")
-    else:
-        print("Enter your PyPI API token:")
-    print("(Get one at https://pypi.org/manage/account/token/)")
     
-    token = getpass("Token: ")
+    # Try to get token from environment variable first
+    token = os.environ.get("PYPI_TOKEN") or os.environ.get("TWINE_PASSWORD")
+    
+    if not token:
+        if test_mode:
+            print("Enter your TestPyPI API token:")
+        else:
+            print("Enter your PyPI API token:")
+        print("(Get one at https://pypi.org/manage/account/token/)")
+        print("(Or set PYPI_TOKEN environment variable)")
+        
+        try:
+            token = getpass("Token: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n❌ Token input cancelled")
+            sys.exit(1)
     
     if not token:
         print("❌ No token provided")

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-01-08
+
+### Added
+
+- **`--session [chat_id]` option**: Lock shell to a persistent chat_id
+
+  - `--session`: locks to last session, or creates a new one
+  - `--session new`: always creates a new session
+  - `--session <chat_id>`: locks to specified chat_id
+  - Run `--session` again to unlock
+  - While locked, all commands in this shell use the same chat_id
+  - Lock state is persisted in `sessions.db`
+
+- **`--last-chat-id` option**: Show the last chat_id for current shell
+  - Displays the session ID with lock status if applicable
+
+### Fixed
+
+- Fixed `--help` output order: now shows cursor-cli options first, then cursor-agent options
+
 ## [0.1.9] - 2026-01-06
 
 ### Added
