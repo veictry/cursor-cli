@@ -509,6 +509,12 @@ def run_with_session_management(
     if is_new_session:
         session_mgr.update_index(session_id, initial_prompt, workspace)
         session_mgr.cleanup_stale_sessions(workspace)
+    else:
+        # For resumed sessions, check if they exist in the index
+        # (they might have been created outside cursor-cli, e.g., via cursor-agent create-chat)
+        existing = session_mgr.get_session(session_id, workspace)
+        if not existing:
+            session_mgr.update_index(session_id, initial_prompt, workspace)
 
     # Build command
     cmd = ["cursor-agent"] + cursor_args

@@ -343,6 +343,12 @@ def cursor_cli(
             session_mgr.update_index(chat_id, prompt, workspace)
             # Periodically cleanup stale shell sessions
             session_mgr.cleanup_stale_sessions(workspace)
+        else:
+            # For resumed sessions, check if they exist in the index
+            # (they might have been created outside cursor-cli)
+            existing = session_mgr.get_session(chat_id, workspace)
+            if not existing:
+                session_mgr.update_index(chat_id, prompt, workspace)
 
     # Check if output_to is set (not the sentinel value)
     use_output_to = not isinstance(output_to, _Unset)
